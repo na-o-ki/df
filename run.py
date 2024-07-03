@@ -7,14 +7,12 @@ Original file is located at
     https://colab.research.google.com/drive/1ph9Bp25MDoeNTX72nEgcMgaCAlm5GX0Y
 """
 import sys
-# Add the path to the src directory
 sys.path.append('/content/drive/MyDrive/Colabdata/dl_lecture_competition_pub/src')
 
 import os
 import torch
 from omegaconf import DictConfig
 import hydra
-import sys
 import numpy as np
 import torch.nn.functional as F
 from torchmetrics import Accuracy
@@ -24,13 +22,11 @@ import wandb
 from utils import set_seed
 from sklearn.preprocessing import StandardScaler
 from datasets import ThingsMEGDataset
-from models import BasicConvClassifier
-import zipfile
+from models import SubjectSpecificConvClassifier  # モデルのインポート
+import clip
+from PIL import Image
 
 @hydra.main(version_base=None, config_path="/content/drive/MyDrive/Colabdata/dl_lecture_competition_pub/configs", config_name="config")
-
-
-
 def run(args: DictConfig):
     set_seed(args.seed)
     logdir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
@@ -42,17 +38,34 @@ def run(args: DictConfig):
 
     scaler = StandardScaler()
     data_dir = args.data_dir
+    
     train_set = ThingsMEGDataset("train", data_dir, scaler=scaler)
     val_set = ThingsMEGDataset("val", data_dir, scaler=scaler)
     test_set = ThingsMEGDataset("test", data_dir, scaler=scaler)
 
     train_loader = torch.utils.data.DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = torch.utils.data.DataLoader(val_set, shuffle=False, **loader_args)
-    test_loader = torch.utils.data.DataLoader(test_set, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers)
+    test_loader = torch.utils.data.DataLoader(test_set, shuffle=False, **loader_args)
 
-    model = BasicConvClassifier(train_set.num_classes, train_set.seq_len, train_set.num_channels).to(args.device)
+    model = SubjectSpecificConvClassifier(train_set.num_classes, train_set.seq_len, train_set.num_channels, num_subjects=train_set.num_subjects).to(args.device)
 
-    # L2正則化の追加
+    # 事前学習済みCLIPモデルと前処理をロード
+    clip_model_path = "/content/drive/MyDrive/Colabdata/dl_lecture_competition_pub/pretrained_models/clip_model.pth"
+    
+    # state_dictを読み込む
+    try:
+        state_dict = torch.load(clip_model_path)
+    except Exception as e:
+        print(f"{clip_model_path}からstate_dictを読み込む際のエラー: {e}")
+        return
+
+    if not state_dict:
+        print("読み込まれたstate_dictはNoneまたは空です。")
+        return
+
+    # state_dictをモデルにロード
+    model.load_state_dict(state_dict, strict=False)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     max_val_acc = 0
@@ -65,9 +78,9 @@ def run(args: DictConfig):
 
         model.train()
         for X, y, subject_idxs in tqdm(train_loader, desc="Train"):
-            X, y = X.to(args.device), y.to(args.device)
+            X, y, subject_idxs = X.to(args.device), y.to(args.device), subject_idxs.to(args.device)
 
-            y_pred = model(X)
+            y_pred = model(X, subject_idxs)
 
             loss = F.cross_entropy(y_pred, y)
             train_loss.append(loss.item())
@@ -81,18 +94,25 @@ def run(args: DictConfig):
 
         model.eval()
         for X, y, subject_idxs in tqdm(val_loader, desc="Validation"):
-            X, y = X.to(args.device), y.to(args.device)
+            X, y, subject_idxs = X.to(args.device), y.to(args.device), subject_idxs.to(args.device)
 
             with torch.no_grad():
-                y_pred = model(X)
+                y_pred = model(X, subject_idxs)
 
             val_loss.append(F.cross_entropy(y_pred, y).item())
             val_acc.append(accuracy(y_pred, y).item())
 
         print(f"Epoch {epoch+1}/{args.epochs} | train loss: {np.mean(train_loss):.3f} | train acc: {np.mean(train_acc):.3f} | val loss: {np.mean(val_loss):.3f} | val acc: {np.mean(val_acc):.3f}")
+
         torch.save(model.state_dict(), os.path.join(logdir, "model_last.pt"))
+
         if args.use_wandb:
-            wandb.log({"train_loss": np.mean(train_loss), "train_acc": np.mean(train_acc), "val_loss": np.mean(val_loss), "val_acc": np.mean(val_acc)})
+            wandb.log({
+                "train_loss": np.mean(train_loss),
+                "train_acc": np.mean(train_acc),
+                "val_loss": np.mean(val_loss),
+                "val_acc": np.mean(val_acc),
+            })
 
         if np.mean(val_acc) > max_val_acc:
             cprint("New best.", "cyan")
@@ -104,7 +124,7 @@ def run(args: DictConfig):
     preds = []
     model.eval()
     for X, subject_idxs in tqdm(test_loader, desc="Validation"):
-        preds.append(model(X.to(args.device)).detach().cpu())
+        preds.append(model(X.to(args.device), subject_idxs.to(args.device)).detach().cpu())
 
     preds = torch.cat(preds, dim=0).numpy()
     np.save(os.path.join(logdir, "submission"), preds)
