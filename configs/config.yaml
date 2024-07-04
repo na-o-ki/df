@@ -1,4 +1,4 @@
-batch_size: 128
+batch_size: 256
 epochs: 80
 lr: 0.001
 
@@ -11,3 +11,5 @@ data_dir: data
 
 # Evaluation
 model_path: 
+
+patience: 1  # 早期終了のための忍耐力
