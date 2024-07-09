@@ -163,7 +163,7 @@ def main(args: DictConfig):
     # ------------------
     #  save submission
     # ------------------
-    file_name = "submission"
+    file_name = "/content/drive/MyDrive/DL最終課題event/submission/submission"
     save_optical_flow_to_npy(flow, file_name)
 
 if __name__ == "__main__":
