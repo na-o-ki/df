@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import hydra
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
@@ -35,6 +36,20 @@ def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor):
     '''
     epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
     return epe
+
+def calculate_loss(flow_dict: dict, target: torch.Tensor) -> torch.Tensor:
+    total_loss = 0.0
+
+    for key in flow_dict:
+        flow_output = flow_dict[key]
+        upsampled_output = F.interpolate(flow_output, size=target.size()[2:], mode='bilinear', align_corners=False)
+        loss = compute_epe_error(upsampled_output, target)
+        total_loss += loss
+
+    total_loss /= len(flow_dict)
+    
+    return total_loss
+
 
 def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     '''
@@ -128,7 +143,7 @@ def main(args: DictConfig):
             event_image = batch["event_volume"].to(device) # [B, 4, 480, 640]
             ground_truth_flow = batch["flow_gt"].to(device) # [B, 2, 480, 640]
             flow = model(event_image) # [B, 2, 480, 640]
-            loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow)
+            loss: torch.Tensor = calculate_loss(flow, ground_truth_flow)
             print(f"batch {i} loss: {loss.item()}")
             optimizer.zero_grad()
             loss.backward()
@@ -158,7 +173,7 @@ def main(args: DictConfig):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device)
             batch_flow = model(event_image) # [1, 2, 480, 640]
-            flow = torch.cat((flow, batch_flow), dim=0)  # [N, 2, 480, 640]
+            flow = torch.cat((flow, batch_flow['flow3']), dim=0)  # [N, 2, 480, 640]
         print("test done")
     # ------------------
     #  save submission
